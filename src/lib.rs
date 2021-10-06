@@ -52,6 +52,7 @@ const NID_sha512: c_int = 674;
 const RSA_PKCS1_PADDING: c_int = 1;
 const RSA_PKCS1_OAEP_PADDING: c_int = 4;
 const RSA_PKCS1_PSS_PADDING: c_int = 6;
+const RSA_FLAG_EXT_PKEY: c_int = 0x0020;
 
 const EVP_PKEY_RSA: c_int = NID_rsaEncryption;
 const EVP_PKEY_EC: c_int = NID_X9_62_id_ecPublicKey;
@@ -67,6 +68,7 @@ type EVP_PKEY_METHOD = *mut c_void;
 type EVP_PKEY_CTX = *mut c_void;
 type EVP_MD = *mut c_void;
 type BIO = *mut c_void;
+type RSA = *mut c_void;
 
 type pkey_init_fn = extern "C" fn(EVP_PKEY_CTX) -> c_int;
 type pkey_sign_fn = extern "C" fn(EVP_PKEY_CTX, *mut c_uchar, *mut usize, *const c_uchar, usize) -> c_int;
@@ -133,6 +135,8 @@ extern "C" {
     fn BIO_new_mem_buf(buf: *const c_void, len: c_int) -> BIO;
     fn BIO_free(a: BIO) -> c_int;
     fn d2i_PUBKEY_bio(bp: BIO, a: *mut EVP_PKEY) -> EVP_PKEY;
+    fn RSA_set_flags(rsa: RSA, flags: c_int) -> c_void;
+    fn EVP_PKEY_get0_RSA(evp: EVP_PKEY) -> RSA;
 }
 
 // Static globals
@@ -367,7 +371,7 @@ extern "C" fn pkey_meths(_e: ENGINE, pmeth: *mut EVP_PKEY_METHOD, _nids: *mut *c
     }
 }
 
-extern "C" fn load_key(e: ENGINE, key_id: *const c_char, _ui_method: *mut c_void, _callback_data: *mut c_void) -> EVP_PKEY {
+extern "C" fn load_pub_key(e: ENGINE, key_id: *const c_char, _ui_method: *mut c_void, _callback_data: *mut c_void) -> EVP_PKEY {
     let key_id = unsafe { std::ffi::CStr::from_ptr(key_id).to_str().unwrap() };
     trace!("load_key for key id {}", key_id);
     let req = rusoto_kms::GetPublicKeyRequest {
@@ -397,6 +401,15 @@ extern "C" fn load_key(e: ENGINE, key_id: *const c_char, _ui_method: *mut c_void
     }
 }
 
+extern "C" fn load_key(e: ENGINE, key_id: *const c_char, _ui_method: *mut c_void, _callback_data: *mut c_void) -> EVP_PKEY {
+    let pubkey = load_pub_key(e, key_id, _ui_method, _callback_data);
+    unsafe {
+        let rsa = EVP_PKEY_get0_RSA(pubkey);
+        RSA_set_flags(rsa, RSA_FLAG_EXT_PKEY);
+    }
+    return pubkey;
+}
+
 // openssl engine entry points
 #[no_mangle]
 pub extern "C" fn v_check(v: c_ulong) -> c_ulong {
@@ -422,7 +435,7 @@ pub extern "C" fn bind_engine(e: ENGINE, _id: *const c_char, fns: *const dynamic
         openssl_try!(ENGINE_set_init_function(e, kms_init));
         openssl_try!(ENGINE_set_pkey_meths(e, pkey_meths));
         openssl_try!(ENGINE_set_load_privkey_function(e, load_key));
-        openssl_try!(ENGINE_set_load_pubkey_function(e, load_key));
+        openssl_try!(ENGINE_set_load_pubkey_function(e, load_pub_key));
         if !std::env::var("OPENSSL_ENGINE_KMS_USE_RAND").unwrap_or("".to_string()).is_empty() {
             openssl_try!(ENGINE_set_RAND(e, &RAND_METH));
         }
